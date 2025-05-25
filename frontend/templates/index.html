@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FERREMAS - Buscador y Venta</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+     </head>
+<body>
+    <div class="container">
+        <header>
+            <h1>FERREMAS - Buscador y Venta (Administración)</h1>
+        </header>
+
+        <main id="app-content">
+
+            <section id="sale-view" class="view active"> <h2>Buscador y Punto de Venta</h2>
+
+                <div class="search-section">
+                    <label for="product-search">Buscar Producto (ID o Nombre):</label>
+                    <input type="text" id="product-search" placeholder="Ingresa ID o nombre del producto">
+                    <button id="search-button">Buscar</button>
+                </div>
+
+                <div class="results-section">
+                    <h3>Resultados de Búsqueda</h3>
+                    <ul id="product-results-list">
+                        </ul>
+                     <p id="search-message" class="message"></p>
+                </div>
+
+                <div class="sale-section">
+                    <h2>Detalle de Venta</h2>
+                    <p>Producto Seleccionado: <span id="selected-product-name">Ninguno</span></p>
+                    <p>Sucursal Seleccionada: <span id="selected-branch-name">Ninguna</span></p>
+                     <p>Stock Disponible: <span id="selected-product-stock">N/A</span></p>
+
+
+                    <label for="quantity">Cantidad:</label>
+                    <input type="number" id="quantity" value="1" min="1">
+                     <button id="calculate-button">Calc USD</button>
+
+                    <p>Precio Unitario (CLP): <span id="unit-price-clp">0</span></p>
+                    <p>Total (CLP): <span id="total-clp">0</span></p>
+                    <p>Total (USD): <span id="total-usd">0</span></p> <button id="sell-button" disabled>Realizar Venta</button> </div>
+
+                <div class="messages-section">
+                    <p id="status-message" class="message"></p>
+                </div>
+
+                <div id="low-stock-notifications">
+                    <h3>Alertas de Stock Bajo</h3>
+                    </div>
+
+            </section>
+
+        </main>
+
+        <footer>
+            <p>&copy; 2025 FERREMAS</p>
+        </footer>
+    </div>
+
+    <div id="myModal" class="modal">
+      <div class="modal-content">
+        <span class="close-button">&times;</span>
+        <h3 id="modal-title"></h3>
+        <p id="modal-body"></p>
+        <button id="modal-ok-button">OK</button>
+      </div>
+    </div>
+
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
