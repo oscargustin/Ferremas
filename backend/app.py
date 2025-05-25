@@ -28,7 +28,7 @@ print(f"DEBUG: SQLAlchemy DB URI being used: {app.config['SQLALCHEMY_DATABASE_UR
 
 db = SQLAlchemy(app)
 
-EXCHANGE_RATE_API_KEY = "fe1b0b877cfcfd563b220ca7" # <<-- ¡Reemplaza con tu clave API de ExchangeRate-API!
+EXCHANGE_RATE_API_KEY = "fe1b0b877cfcfd563b220ca7" 
 EXCHANGE_RATE_API_BASE_URL = f"https://v6.exchangerate-api.com/v6/{EXCHANGE_RATE_API_KEY}/latest/CLP" # Solicita el tipo de cambio más reciente para CLP
 
 
