@@ -3,15 +3,20 @@ import os
 import time
 import json
 import queue
-import requests 
-from flask import Flask, request, jsonify, Response, stream_with_context, render_template
+import requests
+from dotenv import load_dotenv # Importar para cargar variables de entorno
+from flask import Flask, request, jsonify, Response, stream_with_context, render_template, redirect, url_for
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from sqlalchemy import or_
-from sqlalchemy.exc import SQLAlchemyError # Importar para manejar errores de SQLAlchemy
-from transbank.webpay.webpay_plus.transaction import Transaction # Para Webpay Plus
-from transbank.common.options import WebpayOptions # Para configurar opciones
-from transbank.common.integration_type import IntegrationType 
+from sqlalchemy.exc import SQLAlchemyError
+from transbank.webpay.webpay_plus.transaction import Transaction
+from transbank.common.options import WebpayOptions
+from transbank.common.integration_type import IntegrationType
+
+# Cargar variables de entorno al inicio de la aplicación
+# Esto buscará un archivo .env en la misma carpeta que app.py
+load_dotenv()
 
 app = Flask(__name__,
             static_folder='../frontend/static', # ¡Ruta CORREGIDA!
@@ -28,20 +33,32 @@ print(f"DEBUG: SQLAlchemy DB URI being used: {app.config['SQLALCHEMY_DATABASE_UR
 
 db = SQLAlchemy(app)
 
-EXCHANGE_RATE_API_KEY = "fe1b0b877cfcfd563b220ca7" 
-EXCHANGE_RATE_API_BASE_URL = f"https://v6.exchangerate-api.com/v6/{EXCHANGE_RATE_API_KEY}/latest/CLP" # Solicita el tipo de cambio más reciente para CLP
-
+EXCHANGE_RATE_API_KEY = "fe1b0b877cfcfd563b220ca7"
+EXCHANGE_RATE_API_BASE_URL = f"https://v6.exchangerate-api.com/v6/{EXCHANGE_RATE_API_KEY}/latest/CLP"
 
 # --- Configuración de Transbank (¡NUEVO!) ---
 # Estas credenciales son de EJEMPLO para el ambiente de integración (sandbox).
-# Debes reemplazarlas con las que obtengas de Transbank Developers.
-# Las credenciales reales deben ser guardadas de forma segura (ej. variables de entorno).
 TRANSBANK_COMMERCE_CODE = os.environ.get('TRANSBANK_COMMERCE_CODE', '597055555532') 
 TRANSBANK_API_KEY = os.environ.get('TRANSBANK_API_KEY', '579B532A7440BB0C9079DED94D31EA1615BACEB56610332264630D42D0A36B1C') 
 TRANSBANK_ENVIRONMENT = IntegrationType.TEST # O IntegrationType.LIVE para producción
 
 # Inicializar Transbank Webpay Plus Transaction
 # Es crucial configurar las opciones de Webpay con tus credenciales
+webpay_transaction = Transaction(WebpayOptions(
+    TRANSBANK_COMMERCE_CODE,
+    TRANSBANK_API_KEY,
+    TRANSBANK_ENVIRONMENT
+))
+
+
+# Validar que las credenciales de Transbank estén cargadas
+if not TRANSBANK_COMMERCE_CODE or not TRANSBANK_API_KEY:
+    print("ERROR: Transbank credentials (TBK_COMMERCE_CODE, TBK_API_KEY) not loaded from environment variables.")
+    print("       Ensure they are in your .env file locally or in Render's environment variables.")
+    # Considera salir de la aplicación o usar valores de prueba por defecto si esto es un problema crítico
+    # exit(1) # Descomentar para salir si las credenciales son obligatorias al inicio
+
+# Inicializar Transbank Webpay Plus Transaction
 webpay_transaction = Transaction(WebpayOptions(
     TRANSBANK_COMMERCE_CODE,
     TRANSBANK_API_KEY,
@@ -77,6 +94,59 @@ class ProductoSucursal(db.Model):
     __table_args__ = (db.UniqueConstraint('producto_id', 'sucursal_id', name='_producto_sucursal_uc'),)
     def to_dict(self):
         return {'id': self.id, 'producto_id': self.producto_id, 'sucursal_id': self.sucursal_id, 'precio': float(self.precio), 'stock': self.stock}
+    
+    
+class Orden(db.Model):
+    __tablename__ = 'ordenes'
+    id = db.Column(db.Integer, primary_key=True)
+    buy_order = db.Column(db.String(50), unique=True, nullable=False, index=True) # ID único de Transbank
+    session_id = db.Column(db.String(100), nullable=False)
+    amount = db.Column(db.Numeric(10, 2), nullable=False)
+    status = db.Column(db.String(20), nullable=False, default='PENDING') # PENDING, PAID, REJECTED, CANCELLED
+    transaction_date = db.Column(db.DateTime, default=db.func.current_timestamp())
+    authorization_code = db.Column(db.String(20), nullable=True)
+    card_number = db.Column(db.String(4), nullable=True) # Últimos 4 dígitos de la tarjeta
+    response_code = db.Column(db.Integer, nullable=True) # Código de respuesta de Transbank
+    
+    # Relación con los items de la orden
+    items = db.relationship('OrderItem', backref='orden', lazy=True, cascade="all, delete-orphan")
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'buy_order': self.buy_order,
+            'session_id': self.session_id,
+            'amount': float(self.amount),
+            'status': self.status,
+            'transaction_date': self.transaction_date.isoformat() if self.transaction_date else None,
+            'authorization_code': self.authorization_code,
+            'card_number': self.card_number,
+            'response_code': self.response_code
+        }
+        
+        
+class OrderItem(db.Model):
+    __tablename__ = 'orden_items'
+    id = db.Column(db.Integer, primary_key=True)
+    orden_id = db.Column(db.Integer, db.ForeignKey('ordenes.id'), nullable=False)
+    producto_id = db.Column(db.Integer, db.ForeignKey('productos.id'), nullable=False)
+    sucursal_id = db.Column(db.Integer, db.ForeignKey('sucursales.id'), nullable=False)
+    quantity = db.Column(db.Integer, nullable=False)
+    price_at_purchase = db.Column(db.Numeric(10, 2), nullable=False) # Precio unitario al momento de la compra
+
+    # Relaciones de vuelta para acceder fácilmente a los objetos de producto y sucursal
+    producto = db.relationship('Producto')
+    sucursal = db.relationship('Sucursal')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'orden_id': self.orden_id,
+            'producto_id': self.producto_id,
+            'sucursal_id': self.sucursal_id,
+            'quantity': self.quantity,
+            'price_at_purchase': float(self.price_at_purchase)
+        }
 
 # --- Implementación de Server-Sent Events (SSE) ---
 clients = []
@@ -129,12 +199,12 @@ def buscar_productos():
         for ps in productos_sucursales:
             sucursal = Sucursal.query.get(ps.sucursal_id)
             if sucursal:
-                 sucursales_info.append({
-                     "sucursal_id": sucursal.id,
-                     "nombre": sucursal.nombre,
-                     "precio": float(ps.precio),
-                     "stock": ps.stock
-                 })
+                sucursales_info.append({
+                    "sucursal_id": sucursal.id,
+                    "nombre": sucursal.nombre,
+                    "precio": float(ps.precio),
+                    "stock": ps.stock
+                })
         producto_data['sucursales_info'] = sucursales_info
         results.append(producto_data)
     return jsonify(results), 200
@@ -142,18 +212,13 @@ def buscar_productos():
 @app.route('/api/exchange_rate', methods=['GET'])
 def get_exchange_rate():
     try:
-        # Hacer la solicitud a la API externa
         response = requests.get(EXCHANGE_RATE_API_BASE_URL)
-        response.raise_for_status() # Lanza una excepción para errores HTTP (4xx o 5xx)
+        response.raise_for_status()
         data = response.json()
-
         exchange_rate_usd = data['conversion_rates']['USD']
-
         rate_usd_to_clp = 1 / exchange_rate_usd
-
-
         print(f"DEBUG: Tasa de cambio obtenida (1 USD = {rate_usd_to_clp:.2f} CLP)")
-        return jsonify({"rate": round(rate_usd_to_clp, 2)}), 200 
+        return jsonify({"rate": round(rate_usd_to_clp, 2)}), 200
     except requests.exceptions.RequestException as e:
         print(f"Error al conectar con la API de tipo de cambio: {e}")
         return jsonify({"message": "Error al conectar con el servicio de tipo de cambio", "error": str(e)}), 500
@@ -163,66 +228,247 @@ def get_exchange_rate():
     except Exception as e:
         print(f"Error inesperado al obtener el tipo de cambio: {e}")
         return jsonify({"message": "Error interno al obtener el tipo de cambio", "error": str(e)}), 500
-    
-    
-@app.route('/api/venta', methods=['POST'])
-def procesar_venta():
+
+# --- NUEVA RUTA PARA INICIAR PAGO CON TRANSBANK ---
+@app.route('/api/webpay/create', methods=['POST'])
+def create_webpay_transaction():
     data = request.json
-    producto_id = data.get('product_id')
-    sucursal_id = data.get('branch_id')
-    cantidad = data.get('quantity')
-    if not all([producto_id, sucursal_id, cantidad is not None]):
-        return jsonify({"message": "Missing required data (product_id, branch_id, quantity)"}), 400
+    buy_order = data.get('buy_order')
+    session_id = data.get('session_id')
+    amount = data.get('amount')
+    cart_items = data.get('cart_items')
+
+    if os.environ.get('ON_RENDER'):
+        return_url_base = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}"
+    else:
+        return_url_base = "http://127.0.0.1:5000"
+
+    return_url = f"{return_url_base}/api/webpay/commit"
+
+    if not all([buy_order, session_id, amount, cart_items]):
+        return jsonify({"message": "Missing required data for Transbank transaction (buy_order, session_id, amount, cart_items)"}), 400
+
     try:
-        producto_id = int(producto_id)
-        sucursal_id = int(sucursal_id)
-        cantidad = int(cantidad)
-        if cantidad <= 0:
-             return jsonify({"message": "Quantity must be a positive number (minimum 1)"}), 400
-    except ValueError:
-        return jsonify({"message": "Invalid data types (product_id, branch_id, quantity must be integers)"}), 400
-    try:
-        producto_sucursal = ProductoSucursal.query.filter_by(
-            producto_id=producto_id,
-            sucursal_id=sucursal_id
-        ).with_for_update().first()
-        if not producto_sucursal:
-            db.session.rollback()
-            return jsonify({"message": "Product not found in this branch"}), 404
-        if cantidad > producto_sucursal.stock:
-            db.session.rollback()
-            return jsonify({"message": "Insufficient stock", "available_stock": producto_sucursal.stock}), 400
-        producto_sucursal.stock -= cantidad
-        low_stock_threshold = 5
-        if producto_sucursal.stock <= low_stock_threshold:
-             producto = Producto.query.get(producto_id)
-             sucursal = Sucursal.query.get(sucursal_id)
-             product_name = producto.nombre if producto else 'Unknown Product'
-             branch_name = sucursal.nombre if sucursal else 'Unknown Branch'
-             notification_data = {
-                 "product_id": producto_id,
-                 "branch_id": sucursal_id,
-                 "product_name": product_name,
-                 "branch_name": branch_name,
-                 "current_stock": producto_sucursal.stock
-             }
-             notify_clients(notification_data, event='low_stock_alert')
-             print(f"Low stock alert sent for Product ID {producto_id} at Branch ID {sucursal_id}. Stock: {producto_sucursal.stock}")
-        db.session.commit()
-        producto = Producto.query.get(producto_id)
-        sucursal = Sucursal.query.get(sucursal_id)
-        product_name = producto.nombre if producto else 'Unknown Product'
-        branch_name = sucursal.nombre if sucursal else 'Unknown Branch'
-        return jsonify({
-            "message": "Sale processed successfully",
-            "new_stock": producto_sucursal.stock,
-            "product_name": product_name,
-            "branch_name": branch_name
-        }), 200
+        amount = int(amount)
+
+        # --- ALMACENAR ORDEN EN LA BASE DE DATOS COMO PENDIENTE ---
+        new_order = Orden(
+            buy_order=buy_order,
+            session_id=session_id,
+            amount=amount,
+            status='PENDING' # Estado inicial de la orden
+        )
+        db.session.add(new_order)
+        db.session.flush() # Esto asigna un ID a new_order sin hacer un commit aún
+
+        for item_data in cart_items:
+            order_item = OrderItem(
+                orden_id=new_order.id,
+                producto_id=item_data['product_id'],
+                sucursal_id=item_data['sucursal_id'],
+                quantity=item_data['quantity'],
+                price_at_purchase=item_data['price']
+            )
+            db.session.add(order_item)
+        
+        db.session.commit() # Ahora sí, commit para guardar la orden y sus items
+        print(f"DEBUG: Orden {buy_order} y sus items guardados en DB como PENDING.")
+        # -----------------------------------------------------------
+
+        response = webpay_transaction.create(buy_order, session_id, amount, return_url)
+
+        print(f"DEBUG: Tipo de respuesta de Transbank create(): {type(response)}")
+        print(f"DEBUG: Contenido de respuesta de Transbank create(): {response.__dict__ if hasattr(response, '__dict__') else response}")
+
+        if hasattr(response, 'url') and hasattr(response, 'token'):
+            return jsonify({
+                "url": response.url,
+                "token": response.token
+            })
+        elif isinstance(response, dict) and 'url' in response and 'token' in response:
+            print("DEBUG: Transbank create() devolvió un diccionario con url y token. Procesando como éxito.")
+            return jsonify({
+                "url": response['url'],
+                "token": response['token']
+            })
+        else:
+            error_message = "Respuesta inesperada de Transbank al crear transacción."
+            if isinstance(response, dict) and 'error_message' in response:
+                error_message = response.get('error_message')
+            elif isinstance(response, dict) and 'error' in response:
+                error_message = str(response.get('error'))
+
+            print(f"ERROR: Transbank create() no devolvió objeto esperado o dict con url/token: {response}")
+            # Si falla la creación de Transbank, marca la orden como CANCELLED o REJECTED
+            new_order.status = 'CANCELLED' # O 'CREATE_FAILED'
+            db.session.commit()
+            return jsonify({"error": error_message, "transbank_raw_response": str(response)}), 500
+
     except Exception as e:
-        db.session.rollback()
-        print(f"Error processing sale: {e}")
-        return jsonify({"message": "An error occurred while processing the sale", "error": str(e)}), 500
+        db.session.rollback() # Si algo falla antes del commit, revierte
+        print(f"Error EXCEPCIÓN al crear transacción Transbank: {e}")
+        return jsonify({"error": str(e)}), 500
+
+# --- NUEVA RUTA PARA CONFIRMAR PAGO CON TRANSBANK (POST-REDIRECCIÓN) ---
+@app.route('/api/webpay/commit', methods=['GET', 'POST'])
+def commit_webpay_transaction():
+    token_ws = None
+    if request.method == 'POST':
+        token_ws = request.form.get('token_ws')
+    elif request.method == 'GET':
+        token_ws = request.args.get('token_ws')
+
+    if not token_ws:
+        print("ERROR: Token de transacción no encontrado en la respuesta de Transbank.")
+        return render_template('payment_failure.html', message="Token de transacción no encontrado."), 400
+
+    current_order = None # Inicializamos para usarlo en el bloque finally si es necesario
+
+    try:
+        response = webpay_transaction.commit(token_ws)
+
+        print(f"DEBUG: Tipo de respuesta de Transbank commit(): {type(response)}")
+        print(f"DEBUG: Contenido de respuesta de Transbank commit(): {response.__dict__ if hasattr(response, '__dict__') else response}")
+
+        # Extraer el buy_order del response para buscar la orden pendiente
+        # Usamos .get() de forma segura, ya que response puede ser un dict
+        buy_order_from_tbk = getattr(response, 'buy_order', response.get('buy_order', None))
+
+        # --- RECUPERAR ORDEN PENDIENTE DE LA BASE DE DATOS ---
+        if buy_order_from_tbk:
+            current_order = Orden.query.filter_by(buy_order=buy_order_from_tbk, status='PENDING').first()
+            if not current_order:
+                print(f"ERROR: Orden pendiente con buy_order {buy_order_from_tbk} no encontrada o ya procesada.")
+                # Si la orden no se encuentra, podría ser un reintento o un problema
+                return render_template('payment_failure.html', message="Error: Orden no encontrada o ya procesada."), 404
+        else:
+            print("ERROR: Buy Order no encontrado en la respuesta de Transbank.")
+            return render_template('payment_failure.html', message="Error: Buy Order no recibido de Transbank."), 400
+        # -----------------------------------------------------
+
+        # Si la respuesta es un diccionario con 'error_message'
+        if isinstance(response, dict) and 'error_message' in response:
+            error_message_from_tbk = response.get('error_message', 'Error desconocido en Transbank.')
+            print(f"ERROR: Transbank commit() devolvió un error: {error_message_from_tbk}")
+            current_order.status = 'REJECTED' # Marca la orden como rechazada
+            db.session.commit()
+            return render_template('payment_failure.html', message=f"Error en Transbank: {error_message_from_tbk}"), 500
+
+        # Acceder a las propiedades de la respuesta de forma segura
+        response_code = getattr(response, 'response_code', response.get('response_code', None))
+        status_tbk = getattr(response, 'status', response.get('status', 'UNKNOWN'))
+        authorization_code = getattr(response, 'authorization_code', response.get('authorization_code', 'N/A'))
+        transaction_date = getattr(response, 'transaction_date', response.get('transaction_date', 'N/A'))
+        
+        card_detail = getattr(response, 'card_detail', response.get('card_detail', {}))
+        card_number = getattr(card_detail, 'card_number', card_detail.get('card_number', 'N/A'))
+        
+        if response_code == 0:
+            print(f"DEBUG: ¡Transacción Webpay exitosa! Order ID: {buy_order_from_tbk}, Monto: {current_order.amount}")
+            
+            # --- Lógica de Descuento de Stock ---
+            # Usa los items de la orden recuperada de la DB
+            for item in current_order.items:
+                product_id = item.producto_id
+                sucursal_id = item.sucursal_id
+                quantity = item.quantity
+
+                try:
+                    ps = ProductoSucursal.query.filter_by(
+                        producto_id=product_id,
+                        sucursal_id=sucursal_id
+                    ).first()
+
+                    if ps:
+                        if ps.stock >= quantity:
+                            ps.stock -= quantity
+                            db.session.add(ps)
+                            print(f"DEBUG: Descontado {quantity} unidades de Producto {product_id} en Sucursal {sucursal_id}. Nuevo stock: {ps.stock}")
+                            # Notificar sobre stock bajo si aplica
+                            if ps.stock <= 5: # Umbral de stock bajo
+                                notify_clients({
+                                    'product_id': ps.producto_id,
+                                    'product_name': ps.producto.nombre if ps.producto else 'N/A',
+                                    'sucursal_id': ps.sucursal_id,
+                                    'sucursal_name': ps.sucursal.nombre if ps.sucursal else 'N/A',
+                                    'current_stock': ps.stock
+                                }, event='low_stock')
+                        else:
+                            print(f"ADVERTENCIA: Stock insuficiente para Producto {product_id} en Sucursal {sucursal_id}. Disponible: {ps.stock}, Solicitado: {quantity}")
+                            # TODO: Aquí deberías manejar un error de stock.
+                            # Para un sistema robusto, podrías incluso revertir la transacción de Transbank si el stock es crítico.
+                            # Por ahora, solo logueamos y no fallamos la compra por esto.
+                    else:
+                        print(f"ADVERTENCIA: ProductoSucursal no encontrado para Producto {product_id} en Sucursal {sucursal_id}. No se descontó stock.")
+                except Exception as stock_e:
+                    print(f"ERROR: Fallo al descontar stock para item de orden {item.id}: {stock_e}")
+            
+            # Actualiza el estado de la orden en la DB a PAGADO/COMPLETADO
+            current_order.status = 'PAID'
+            current_order.authorization_code = authorization_code
+            current_order.card_number = card_number
+            current_order.response_code = response_code
+            current_order.transaction_date = transaction_date if transaction_date != 'N/A' else None # Convertir a None si no es válido
+            db.session.add(current_order) # Agrega la orden modificada a la sesión
+
+            db.session.commit() # Confirma todos los cambios de stock y el estado de la orden
+            print(f"DEBUG: Orden {current_order.buy_order} marcada como PAID y stock descontado.")
+
+
+            return render_template('payment_success.html',
+                                   message=f"¡Pago exitoso! ID de Autorización: {authorization_code}",
+                                   buy_order=buy_order_from_tbk, # Usar el buy_order real de la orden
+                                   amount=current_order.amount, # Usar el monto de la orden guardada
+                                   card_number=card_number,
+                                   transaction_date=transaction_date,
+                                   status=status_tbk)
+        else:
+            # La transacción no fue exitosa (ej. tarjeta rechazada)
+            error_message = f"Pago fallido. Código de respuesta: {response_code}. "
+            if response_code == -1:
+                error_message += "La tarjeta no posee fondos suficientes."
+            elif response_code == -2:
+                error_message += "Tarjeta o clave inválida."
+            elif response_code == -3:
+                error_message += "Error de Transacción (ej. excedió monto máximo diario)."
+            elif response_code == -4:
+                error_message += "Transacción Rechazada por Transbank."
+            elif response_code == -5:
+                error_message += "Error de la operación."
+            elif response_code == -6:
+                error_message += "Excedió número de reintentos de clave."
+            elif response_code == -7:
+                error_message += "Rechazada - No se puede realizar la venta."
+            else:
+                error_message += "Mensaje detallado no disponible o código desconocido."
+
+            print(f"ERROR: Transacción fallida. Respuesta completa: {response}")
+            
+            # Marca la orden como REJECTED
+            current_order.status = 'REJECTED'
+            current_order.authorization_code = authorization_code
+            current_order.card_number = card_number
+            current_order.response_code = response_code
+            current_order.transaction_date = transaction_date if transaction_date != 'N/A' else None
+            db.session.commit()
+            print(f"DEBUG: Orden {current_order.buy_order} marcada como REJECTED.")
+
+            return render_template('payment_failure.html',
+                                   message=error_message,
+                                   buy_order=buy_order_from_tbk,
+                                   amount=current_order.amount,
+                                   status=status_tbk,
+                                   response_code=response_code), 400
+
+    except Exception as e:
+        db.session.rollback() # En caso de cualquier excepción, revierte la transacción de la DB
+        print(f"Error EXCEPCIÓN al confirmar transacción Transbank: {e}")
+        # Si la orden ya se había creado y se encuentra en la excepción, márcala como 'FAILED'
+        if current_order and current_order.id and current_order.status == 'PENDING':
+             current_order.status = 'FAILED'
+             db.session.commit()
+             print(f"DEBUG: Orden {current_order.buy_order} marcada como FAILED tras excepción.")
+        return render_template('payment_failure.html', message=f"Error interno al confirmar el pago: {e}"), 500
 
 @app.route('/events/low-stock')
 def low_stock_events():
@@ -250,12 +496,14 @@ if __name__ == '__main__':
     with app.app_context():
         print("DEBUG: Attempting to create database tables...")
         try:
-            db.create_all()
+
+            db.create_all() 
             print("DEBUG: Database tables created successfully (or already exist).")
 
             # TODO: Opcional: Añadir datos de ejemplo si la base de datos está vacía
             # Puedes usar este bloque para poblar tu DB con datos de prueba
             # Descomenta y ajusta si necesitas insertar datos iniciales
+
             if not Sucursal.query.first():
                 print("Adding sample data...")
                 sucursal1 = Sucursal(nombre='Sucursal Centro', direccion='Calle Falsa 123')
@@ -263,60 +511,43 @@ if __name__ == '__main__':
                 db.session.add_all([sucursal1, sucursal2])
                 db.session.commit()
                 print("Sample sucursales added.")
-            
+
             if not Producto.query.first():
-                 producto1 = Producto(nombre='Martillo', marca='ToolCo')
-                 producto2 = Producto(nombre='Destornillador Phillips', marca='FixIt')
-                 producto3 = Producto(nombre='Sierra', marca='CutMaster')
-                 db.session.add_all([producto1, producto2, producto3])
-                 db.session.commit()
-                 print("Sample productos added.")
+                producto1 = Producto(nombre='Martillo', marca='ToolCo')
+                producto2 = Producto(nombre='Destornillador Phillips', marca='FixIt')
+                producto3 = Producto(nombre='Sierra', marca='CutMaster')
+                db.session.add_all([producto1, producto2, producto3])
+                db.session.commit()
+                print("Sample productos added.")
+
+                # Añadir stock y precio en sucursales (ejemplo)
+                # Asegúrate de que los IDs de sucursal y producto existan
+                s1 = Sucursal.query.filter_by(nombre='Sucursal Centro').first()
+                s2 = Sucursal.query.filter_by(nombre='Casa Matriz').first()
+                p1 = Producto.query.filter_by(nombre='Martillo').first()
+                p2 = Producto.query.filter_by(nombre='Destornillador Phillips').first()
+                p3 = Producto.query.filter_by(nombre='Sierra').first()
+
+                if s1 and s2 and p1 and p2 and p3:
+                    # Stock bajo para probar SSE
+                    ps1 = ProductoSucursal(producto=p1, sucursal=s1, precio=15000.00, stock=10) 
+                    ps2 = ProductoSucursal(producto=p1, sucursal=s2, precio=10000.00, stock=50)
+                    ps3 = ProductoSucursal(producto=p2, sucursal=s1, precio=20000.00, stock=30)
+                    ps4 = ProductoSucursal(producto=p3, sucursal=s2, precio=19000.00, stock=25)
+
+                    db.session.add_all([ps1, ps2, ps3, ps4])
+                    db.session.commit()
+                    print("Sample ProductoSucursal data added.")
+                else:
+                    print("WARNING: Could not add ProductoSucursal data, some parent records not found.")
             
-                 # Añadir stock y precio en sucursales (ejemplo)
-                 # Asegúrate de que los IDs de sucursal y producto existan
-                 # Stock bajo para Martillo en Sucursal Centro para probar SSE
-                 # Puedes obtener los objetos recién creados o buscarlos por ID
-                 s1 = Sucursal.query.filter_by(nombre='Sucursal Centro').first()
-                 s2 = Sucursal.query.filter_by(nombre='Casa Matriz').first()
-                 p1 = Producto.query.filter_by(nombre='Martillo').first()
-                 p2 = Producto.query.filter_by(nombre='Destornillador Phillips').first()
-                 p3 = Producto.query.filter_by(nombre='Sierra').first()
-            
-                 if s1 and s2 and p1 and p2 and p3:
-                     ps1 = ProductoSucursal(producto=p1, sucursal=s1, precio=15000.00, stock=50) # Stock bajo
-                     ps2 = ProductoSucursal(producto=p1, sucursal=s2, precio=10000.00, stock=50)
-                     ps3 = ProductoSucursal(producto=p2, sucursal=s1, precio=20000.00, stock=50)
-                     ps4 = ProductoSucursal(producto=p3, sucursal=s2, precio=19000.00, stock=50)
-                     
-                     
-                     
-                     
-                     
-                     
-                     
-                     
-                     
-                     
-                     
-                     db.session.add_all([ps1, ps2, ps3, ps4])
-                     db.session.commit()
-                     print("Sample ProductoSucursal data added.")
-                 else:
-                     print("WARNING: Could not add ProductoSucursal data, some parent records not found.")
+
 
         except SQLAlchemyError as e:
             print(f"ERROR: SQLAlchemy error during db.create_all(): {e}")
-            # Puedes añadir sys.exit(1) aquí para que el programa termine si hay un error crítico
-            # import sys
-            # sys.exit(1)
         except Exception as e:
             print(f"ERROR: An unexpected error occurred during initialization: {e}")
-            # import sys
-            # sys.exit(1)
 
     # Ejecutar la aplicación Flask
-    # debug=True es solo para desarrollo
-    # threaded=True es importante para SSE con esta implementación simple de colas
     print("DEBUG: Attempting to run Flask app...")
     app.run(debug=True, port=5000, threaded=True)
-
