@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package product;
+
+// El servicio de productos.
+service ProductService {
+  // Añade un nuevo producto a la base de datos.
+  rpc AddProduct (AddProductRequest) returns (AddProductResponse);
+}
+
+// Mensaje para la solicitud de añadir un producto.
+message AddProductRequest {
+  string name = 1;
+  string description = 2; // Campo para la descripción del producto
+  double price = 3;       // Campo para el precio del producto
+  string image_base64 = 4; // Campo para la imagen codificada en Base64
+}
+
+// Mensaje para la respuesta de añadir un producto.
+message AddProductResponse {
+  bool success = 1;
+  string message = 2;
+  int32 product_id = 3; // ID del producto añadido si la operación fue exitosa
+}
